@@ -1,24 +1,56 @@
 /**
  * NoDistract - Reader Mode for Any Webpage
- * Extracts main content and images, removing clutter for easy reading
- * @version 2.0.0
+ * Extracts main content, images and video players, removing clutter for easy reading
+ * @version 2.1.0
  * @license MIT
  */
 
 class NoDistract {
 	constructor() {
 		this.readabilityLoaded = false;
+		this.prefs = this.loadPrefs();
 		this.init();
+	}
+
+	/**
+	 * Loads reading preferences (theme, font size) from localStorage,
+	 * defaulting the theme to the system preference
+	 */
+	loadPrefs() {
+		const prefs = {
+			fontScale: 1,
+			dark: window.matchMedia?.("(prefers-color-scheme: dark)").matches || false
+		};
+		try {
+			const saved = JSON.parse(localStorage.getItem("nodistract-prefs"));
+			if (saved) Object.assign(prefs, saved);
+		} catch (e) { /* localStorage may be blocked; use defaults */ }
+		return prefs;
+	}
+
+	savePrefs() {
+		try {
+			localStorage.setItem("nodistract-prefs", JSON.stringify(this.prefs));
+		} catch (e) { /* localStorage may be blocked; preferences won't persist */ }
+	}
+
+	/**
+	 * Applies current preferences to the reader page
+	 */
+	applyPrefs() {
+		document.body.style.setProperty("--nd-font-scale", this.prefs.fontScale);
+		document.body.classList.toggle("readable-dark", this.prefs.dark);
+		const themeButton = document.querySelector(".readable-theme");
+		if (themeButton) themeButton.textContent = this.prefs.dark ? "☀️" : "🌙";
 	}
 
 	/**
 	 * Creates a clean, readable article page
 	 */
 	createArticlePage(title, author, content, image) {
-		// Preserve original document for potential restoration
-		const originalHTML = document.body.innerHTML;
-		const originalClass = document.body.className;
-		
+		// Capture video players BEFORE wiping the page (Readability drops them)
+		const videos = this.detectVideos();
+
 		// Disable all scripts on the page before switching to reader mode
 		this.disablePageScripts();
 		
@@ -47,6 +79,37 @@ class NoDistract {
 			page.appendChild(pageAuthor);
 		}
 
+		// Add video players (streams, embeds) detected on the original page
+		if (videos.length) {
+			const videoSection = document.createElement("div");
+			videoSection.className = "readable-videos";
+
+			videos.forEach(item => {
+				const wrapper = document.createElement("div");
+				wrapper.className = "readable-video-wrapper";
+
+				if (item.type === "video") {
+					// Reuse the original <video> node to keep its sources/state
+					item.element.controls = true;
+					item.element.removeAttribute("width");
+					item.element.removeAttribute("height");
+					wrapper.appendChild(item.element);
+				} else {
+					const frame = document.createElement("iframe");
+					frame.src = item.src;
+					frame.allowFullscreen = true;
+					frame.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture");
+					// Sandbox without allow-popups: the player runs, but its pop-up ads don't
+					frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-presentation");
+					wrapper.appendChild(frame);
+				}
+
+				videoSection.appendChild(wrapper);
+			});
+
+			page.appendChild(videoSection);
+		}
+
 		// Add featured image
 		if (image) {
 			const pageImage = document.createElement("img");
@@ -61,27 +124,99 @@ class NoDistract {
 		const pageContent = document.createElement("div");
 		pageContent.className = "readable-content";
 		pageContent.innerHTML = content;
+
+		// Readability keeps some known embeds (e.g. YouTube) in the content;
+		// remove them there so they only appear once, in the video section
+		if (videos.length) {
+			const detectedSrcs = new Set(videos.map(v => v.src).filter(Boolean));
+			pageContent.querySelectorAll("iframe, video").forEach(el => {
+				if (detectedSrcs.has(el.src)) el.remove();
+			});
+		}
+
 		page.appendChild(pageContent);
 
-		// Add close button to restore original page
-		const closeButton = document.createElement("button");
-		closeButton.className = "readable-close";
-		closeButton.innerHTML = "✕ Fechar modo leitura";
-		closeButton.onclick = () => {
-			document.body.innerHTML = originalHTML;
-			document.body.className = originalClass;
-			document.querySelectorAll('style[data-readable]').forEach(el => el.remove());
+		// Add toolbar: font size, theme toggle and close
+		const toolbar = document.createElement("div");
+		toolbar.className = "readable-toolbar";
+
+		const makeButton = (className, label, title, onClick) => {
+			const button = document.createElement("button");
+			button.className = "readable-button " + className;
+			button.textContent = label;
+			button.title = title;
+			button.onclick = onClick;
+			toolbar.appendChild(button);
+			return button;
 		};
-		page.appendChild(closeButton);
+
+		makeButton("readable-font-down", "A−", "Diminuir fonte", () => this.changeFontSize(-0.1));
+		makeButton("readable-font-up", "A+", "Aumentar fonte", () => this.changeFontSize(0.1));
+		makeButton("readable-theme", "🌙", "Alternar tema claro/escuro", () => {
+			this.prefs.dark = !this.prefs.dark;
+			this.savePrefs();
+			this.applyPrefs();
+		});
+		makeButton("readable-close", "✕ Fechar", "Fechar modo leitura", () => location.reload());
+
+		page.appendChild(toolbar);
 
 		// Inject styles
 		this.injectStyles();
 
 		// Append to body
 		document.body.appendChild(page);
-		
+
+		// Apply saved theme and font size
+		this.applyPrefs();
+
 		// Scroll to top
 		window.scrollTo(0, 0);
+	}
+
+	/**
+	 * Adjusts the reading font size within sane bounds
+	 */
+	changeFontSize(delta) {
+		this.prefs.fontScale = Math.min(1.6, Math.max(0.8, Math.round((this.prefs.fontScale + delta) * 10) / 10));
+		this.savePrefs();
+		this.applyPrefs();
+	}
+
+	/**
+	 * Finds video players on the original page (native <video> and embed iframes),
+	 * filtering out ad/tracker iframes. Must run before the page is wiped.
+	 */
+	detectVideos() {
+		const videos = [];
+		const seen = new Set();
+
+		const adPatterns = /doubleclick|googlesyndication|googleads|adservice|adsystem|amazon-adsystem|taboola|outbrain|criteo|popads|propeller|adsterra|recaptcha|disqus|facebook\.com\/plugins|platform\.twitter/i;
+		const playerPatterns = /youtube|youtu\.be|vimeo|dailymotion|ok\.ru|blogger\.com\/video|streamtape|filemoon|mixdrop|dood|mp4upload|voe\.|vidhide|filelions|luluvdo|csst\.|warezcdn|embed|\/e\/|player|\.mp4|\.m3u8/i;
+
+		// Native <video> elements — keep a reference to the original node
+		document.querySelectorAll("video").forEach(video => {
+			const src = video.currentSrc || video.src || video.querySelector("source")?.src || "";
+			const key = src || "video-" + videos.length;
+			if (seen.has(key)) return;
+			seen.add(key);
+			videos.push({ type: "video", element: video, src });
+		});
+
+		// Iframes that look like video players (by URL or by size)
+		document.querySelectorAll("iframe").forEach(frame => {
+			const src = frame.src || frame.dataset.src || frame.dataset.lazySrc || "";
+			if (!src || src === "about:blank" || adPatterns.test(src)) return;
+
+			const rect = frame.getBoundingClientRect();
+			const looksLikePlayer = playerPatterns.test(src) || (rect.width >= 300 && rect.height >= 150);
+			if (!looksLikePlayer || seen.has(src)) return;
+
+			seen.add(src);
+			videos.push({ type: "iframe", src });
+		});
+
+		return videos;
 	}
 
 	/**
@@ -196,8 +331,31 @@ class NoDistract {
 				display: block;
 			}
 
+			.readable-videos {
+				margin: 0 0 30px 0;
+			}
+
+			.readable-video-wrapper {
+				position: relative;
+				width: 100%;
+				aspect-ratio: 16 / 9;
+				margin: 0 0 20px 0;
+				background: #000;
+				border-radius: 8px;
+				overflow: hidden;
+			}
+
+			.readable-video-wrapper iframe,
+			.readable-video-wrapper video {
+				position: absolute;
+				inset: 0;
+				width: 100%;
+				height: 100%;
+				border: 0;
+			}
+
 			.readable-content {
-				font-size: 1.125rem;
+				font-size: calc(1.125rem * var(--nd-font-scale, 1));
 				line-height: 1.8;
 				color: #2c3e50;
 			}
@@ -294,27 +452,101 @@ class NoDistract {
 				margin: 0.5em 0;
 			}
 
-			.readable-close {
+			.readable-toolbar {
 				position: fixed;
 				top: 20px;
 				right: 20px;
-				background: #e74c3c;
-				color: white;
+				display: flex;
+				gap: 8px;
+				z-index: 1000;
+			}
+
+			.readable-button {
+				background: #ffffff;
+				color: #2c3e50;
 				border: none;
-				padding: 12px 24px;
+				padding: 12px 16px;
 				border-radius: 50px;
 				cursor: pointer;
 				font-size: 0.9rem;
 				font-weight: 600;
-				box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
+				box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 				transition: all 0.3s ease;
-				z-index: 1000;
+			}
+
+			.readable-button:hover {
+				transform: translateY(-2px);
+				box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+			}
+
+			.readable-close {
+				background: #e74c3c;
+				color: white;
+				padding: 12px 24px;
+				box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
 			}
 
 			.readable-close:hover {
 				background: #c0392b;
-				transform: translateY(-2px);
 				box-shadow: 0 6px 16px rgba(231, 76, 60, 0.5);
+			}
+
+			/* Dark theme */
+			body.readable-dark {
+				background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+				color: #d5d9e0;
+			}
+
+			body.readable-dark .readable-page {
+				background: #1f2937;
+				box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+			}
+
+			body.readable-dark .readable-title {
+				color: #f3f4f6;
+			}
+
+			body.readable-dark .readable-author {
+				color: #9ca3af;
+			}
+
+			body.readable-dark .readable-content {
+				color: #d5d9e0;
+			}
+
+			body.readable-dark .readable-content blockquote {
+				background: #111827;
+				border-left-color: #60a5fa;
+			}
+
+			body.readable-dark .readable-content code {
+				background: #111827;
+				color: #e5e7eb;
+			}
+
+			body.readable-dark .readable-content a {
+				color: #60a5fa;
+				border-bottom-color: #60a5fa;
+			}
+
+			body.readable-dark .readable-content a:hover {
+				color: #93c5fd;
+				border-bottom-color: #93c5fd;
+			}
+
+			body.readable-dark .readable-content figcaption {
+				color: #9ca3af;
+			}
+
+			body.readable-dark .readable-button {
+				background: #374151;
+				color: #f3f4f6;
+				box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+			}
+
+			body.readable-dark .readable-close {
+				background: #e74c3c;
+				color: white;
 			}
 
 			/* Responsive design */
@@ -332,14 +564,22 @@ class NoDistract {
 				}
 
 				.readable-content {
-					font-size: 1rem;
+					font-size: calc(1rem * var(--nd-font-scale, 1));
+				}
+
+				.readable-toolbar {
+					top: 10px;
+					right: 10px;
+					gap: 6px;
+				}
+
+				.readable-button {
+					padding: 10px 14px;
+					font-size: 0.85rem;
 				}
 
 				.readable-close {
-					top: 10px;
-					right: 10px;
 					padding: 10px 20px;
-					font-size: 0.85rem;
 				}
 			}
 
@@ -355,7 +595,7 @@ class NoDistract {
 					padding: 0;
 				}
 
-				.readable-close {
+				.readable-toolbar {
 					display: none;
 				}
 			}
@@ -367,28 +607,28 @@ class NoDistract {
 	 * Parses the current page using Readability
 	 */
 	parseArticle() {
+		let article = null;
+
 		try {
 			if (typeof Readability === 'undefined') {
 				throw new Error('Readability library not loaded');
 			}
 
 			const documentClone = document.cloneNode(true);
-			const article = new Readability(documentClone).parse();
-
-			if (!article) {
-				throw new Error('Failed to parse article content');
-			}
-
-			this.createArticlePage(
-				article.title || document.title,
-				article.byline || '',
-				article.content || '<p>Não foi possível extrair o conteúdo.</p>',
-				article.image || ''
-			);
+			// charThreshold lowered so pages with little text (e.g. video pages) still parse
+			article = new Readability(documentClone, { charThreshold: 100 }).parse();
 		} catch (error) {
-			console.error('Error parsing article:', error);
-			alert('Erro ao processar a página: ' + error.message);
+			// Keep going: pages with video players often have no extractable text,
+			// and the reader page is still useful to isolate the player
+			console.warn('NoDistract: could not parse article text:', error);
 		}
+
+		this.createArticlePage(
+			article?.title || document.title,
+			article?.byline || '',
+			article?.content || '<p>Não foi possível extrair o conteúdo de texto desta página.</p>',
+			article?.image || ''
+		);
 	}
 
 	/**

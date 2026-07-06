@@ -8,8 +8,11 @@
 - 🎨 **Design minimalista** - Interface limpa com gradiente suave e tipografia otimizada
 - 📱 **Responsivo** - Funciona perfeitamente em desktop, tablet e mobile
 - 🖼️ **Preserva imagens** - Mantém imagens do artigo com tratamento adequado
+- 🎬 **Preserva vídeos** - Detecta players (`<video>` e iframes de embed) e os mantém no modo leitura, bloqueando pop-ups do player via sandbox
 - ⚡ **Sem dependências pesadas** - Apenas Readability.js, sem jQuery ou Bootstrap
-- 🔄 **Reversível** - Botão para restaurar a página original a qualquer momento
+- 🌙 **Modo escuro** - Alterna entre tema claro e escuro, respeitando a preferência do sistema
+- 🔠 **Tamanho de fonte ajustável** - Botões A− / A+ com preferência salva entre sessões
+- 🔄 **Reversível** - Botão para recarregar a página original a qualquer momento
 - 📖 **Pronto para impressão** - Estilos otimizados para impressão
 
 ## 🚀 Demo
